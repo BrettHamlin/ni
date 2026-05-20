@@ -16,10 +16,12 @@ import { getCommand, UnsupportedCommand } from './parse'
 import { cmdExists, remove } from './utils'
 
 const DEBUG_SIGN = '?'
+const DRY_RUN_SIGN = '--dry-run'
 const PROGRAMMATIC_SIGN = '--programmatic'
 
 export interface RunnerContext {
   programmatic?: boolean
+  dryRun?: boolean
   hasLock?: boolean
   cwd?: string
 }
@@ -34,7 +36,7 @@ interface RunOptions {
    *
    * Useful for performing concrete, agent-agnostic operations.
    */
-  onBeforeCommand?: (args: string[], ctx: Pick<RunnerContext, 'cwd' | 'programmatic'> & {
+  onBeforeCommand?: (args: string[], ctx: Pick<RunnerContext, 'cwd' | 'programmatic' | 'dryRun'> & {
     /**
      * Skips subsequent command execution.
      *
@@ -45,6 +47,35 @@ interface RunOptions {
 }
 
 export type Runner = (agent: Agent, args: string[], ctx?: RunnerContext) => Promise<ExtendedResolvedCommand | undefined> | ExtendedResolvedCommand | undefined
+
+function consumeTopLevelDryRunSign(args: string[]) {
+  let i = 0
+
+  while (i < args.length) {
+    const arg = args[i]
+
+    if (arg === '--')
+      return false
+
+    if (arg === PROGRAMMATIC_SIGN) {
+      i += 1
+      continue
+    }
+
+    if (arg === '-C' && i + 1 < args.length) {
+      i += 2
+      continue
+    }
+
+    break
+  }
+
+  if (args[i] !== DRY_RUN_SIGN)
+    return false
+
+  args.splice(i, 1)
+  return true
+}
 
 export async function runCli(fn: Runner, options: DetectOptions & RunOptions & { args?: string[] } = {}) {
   options = {
@@ -71,14 +102,20 @@ export async function runCli(fn: Runner, options: DetectOptions & RunOptions & {
 export async function getCliCommand(
   fn: Runner,
   args: string[],
-  options: DetectOptions = {},
+  options: DetectOptions & Pick<RunnerContext, 'dryRun'> = {},
   cwd: string = options.cwd ?? process.cwd(),
 ) {
+  const { dryRun, ...detectOptions } = options
   const isGlobal = args.includes('-g')
   if (isGlobal)
-    return await fn(await getGlobalAgent(), args)
+    return await fn(await getGlobalAgent(), args, {
+      programmatic: options.programmatic,
+      ...(dryRun ? { dryRun: true } : {}),
+      hasLock: false,
+      cwd,
+    })
 
-  let agent = (await detect({ ...options, cwd })) || (await getDefaultAgent(options.programmatic))
+  let agent = (await detect({ ...detectOptions, cwd })) || (await getDefaultAgent(options.programmatic))
   if (agent === 'prompt') {
     agent = (
       await prompts({
@@ -94,6 +131,7 @@ export async function getCliCommand(
 
   return await fn(agent as Agent, args, {
     programmatic: options.programmatic,
+    ...(dryRun ? { dryRun: true } : {}),
     hasLock: Boolean(agent),
     cwd,
   })
@@ -102,9 +140,12 @@ export async function getCliCommand(
 export async function run(fn: Runner, args: string[], options: DetectOptions & RunOptions = {}) {
   const { detectVolta = true } = options
 
-  const debug = args.includes(DEBUG_SIGN)
-  if (debug)
+  const hasDebugSign = args.includes(DEBUG_SIGN)
+  if (hasDebugSign)
     remove(args, DEBUG_SIGN)
+
+  const dryRunFromArgs = consumeTopLevelDryRunSign(args)
+  const debug = hasDebugSign || dryRunFromArgs
 
   const programmaticFromArgs = args.includes(PROGRAMMATIC_SIGN)
   if (programmaticFromArgs)
@@ -178,7 +219,7 @@ export async function run(fn: Runner, args: string[], options: DetectOptions & R
     console.log(`ni -v       ${dash}  show used agent`)
     console.log(`ni --agent  ${dash}  print detected agent name (for scripting)`)
     console.log(`ni -i ${dash}  interactive package management`)
-    console.log(`ni ?  ${dash}  dry run (print the resolved command)`)
+    console.log(`ni ?, ni --dry-run  ${dash}  dry run (print the resolved command)`)
     console.log(styleText('yellow', '\ncheck https://github.com/antfu/ni for more documentation.'))
     return
   }
@@ -188,13 +229,14 @@ export async function run(fn: Runner, args: string[], options: DetectOptions & R
     await options.onBeforeCommand(args, {
       cwd,
       programmatic,
+      ...(debug ? { dryRun: true } : {}),
       exit: () => { shouldExit = true },
     })
     if (shouldExit)
       return
   }
 
-  const command = await getCliCommand(fn, args, { ...options, programmatic }, cwd)
+  const command = await getCliCommand(fn, args, { ...options, programmatic, dryRun: debug }, cwd)
 
   if (!command)
     return

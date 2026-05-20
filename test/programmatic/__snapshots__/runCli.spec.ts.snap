@@ -2,6 +2,22 @@
 
 exports[`debug mode > should return command results in plain text format 1`] = `"npm i @antfu/ni"`;
 
+exports[`dry-run preview mode > ni npm --dry-run snapshots match ? snapshots 1`] = `"npm i"`;
+
+exports[`dry-run preview mode > ni npm --dry-run snapshots match ? snapshots 2`] = `"npm i"`;
+
+exports[`dry-run preview mode > ni pnpm --dry-run snapshots match ? snapshots 1`] = `"pnpm i"`;
+
+exports[`dry-run preview mode > ni pnpm --dry-run snapshots match ? snapshots 2`] = `"pnpm i"`;
+
+exports[`dry-run preview mode > nr npm --dry-run snapshots match ? snapshots 1`] = `"npm run test"`;
+
+exports[`dry-run preview mode > nr npm --dry-run snapshots match ? snapshots 2`] = `"npm run test"`;
+
+exports[`dry-run preview mode > nr pnpm --dry-run snapshots match ? snapshots 1`] = `"pnpm run test"`;
+
+exports[`dry-run preview mode > nr pnpm --dry-run snapshots match ? snapshots 2`] = `"pnpm run test"`;
+
 exports[`lockfile > bun > na 1`] = `"bun"`;
 
 exports[`lockfile > bun > na run foo 1`] = `"bun run foo"`;

@@ -73,6 +73,9 @@ export async function handleCatalogInstall(
   if (!provider)
     return undefined
 
+  if (ctx?.dryRun)
+    return undefined
+
   // Check for workspace flag
   const hasWorkspaceFlag = args.includes('-w') || args.includes('--workspace')
   const cleanArgs = args.filter(a => a !== '-w' && a !== '--workspace')

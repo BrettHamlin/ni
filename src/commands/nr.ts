@@ -120,7 +120,7 @@ runCli(async (agent, args, ctx) => {
     await promptSelectScript(raw)
   }
 
-  if (storage.lastRunCommand !== args[0]) {
+  if (!ctx?.dryRun && storage.lastRunCommand !== args[0]) {
     storage.lastRunCommand = args[0]
     dump()
   }

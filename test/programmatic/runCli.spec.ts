@@ -3,11 +3,32 @@ import type { Runner } from '../../src'
 import fs from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { AGENTS, parseNa, parseNi, parseNlx, parseNun, parseNup, runCli } from '../../src'
+import { AGENTS, parseNa, parseNd, parseNi, parseNlx, parseNr, parseNun, parseNup, runCli } from '../../src'
 
 let basicLog: MockInstance, errorLog: MockInstance, warnLog: MockInstance, infoLog: MockInstance
+
+const tinyexecMocks = vi.hoisted(() => ({
+  x: vi.fn((cmd: string, args?: string[]) => {
+    // break execution flow for easier snapshotting
+    // eslint-disable-next-line no-throw-literal
+    throw { command: [cmd, ...(args ?? [])].join(' ') }
+  }),
+}))
+
+vi.mock('tinyexec', async (importOriginal) => {
+  const mod = await importOriginal<typeof import('tinyexec')>()
+  return {
+    ...mod,
+    x: tinyexecMocks.x,
+  }
+})
+vi.mock('which', () => ({
+  default: {
+    sync: vi.fn(() => null),
+  },
+}))
 
 function runCliTest(fixtureName: string, agent: string, runner: Runner, args: string[]) {
   return async () => {
@@ -40,18 +61,6 @@ beforeAll(() => {
   warnLog = vi.spyOn(console, 'warn')
   errorLog = vi.spyOn(console, 'error')
   infoLog = vi.spyOn(console, 'info')
-
-  vi.mock('tinyexec', async (importOriginal) => {
-    const mod = await importOriginal() as any
-    return {
-      ...mod,
-      x: (cmd: string, args?: string[]) => {
-        // break execution flow for easier snapshotting
-        // eslint-disable-next-line no-throw-literal
-        throw { command: [cmd, ...(args ?? [])].join(' ') }
-      },
-    }
-  })
 })
 
 afterAll(() => {
@@ -107,4 +116,135 @@ describe('debug mode', () => {
 
     expect(basicLog.mock.calls[0][0]).toMatchSnapshot()
   })
+})
+
+async function runPreview(fixtureName: string, agent: string, runner: Runner, args: string[]) {
+  const logSpy = vi.spyOn(console, 'log')
+  logSpy.mockClear()
+  tinyexecMocks.x.mockClear()
+
+  const cwd = await fs.mkdtemp(path.join(tmpdir(), 'ni-'))
+  const fixture = path.join(__dirname, '..', 'fixtures', fixtureName, agent)
+  await fs.cp(fixture, cwd, { recursive: true })
+
+  await runCli(runner, {
+    programmatic: true,
+    cwd,
+    args,
+  })
+
+  expect(logSpy).toHaveBeenCalledTimes(1)
+  expect(tinyexecMocks.x).toHaveBeenCalledTimes(0)
+
+  const output = logSpy.mock.calls[0][0]
+  expect(typeof output).toBe('string')
+  expect(output.length).toBeGreaterThan(0)
+  return output as string
+}
+
+describe('dry-run preview mode', () => {
+  beforeEach(() => {
+    basicLog.mockClear()
+    tinyexecMocks.x.mockClear()
+  })
+
+  const commandCases: {
+    name: string
+    runner: Runner
+    args: string[]
+    expected: Record<'npm' | 'pnpm', RegExp>
+  }[] = [
+    {
+      name: 'ni',
+      runner: parseNi,
+      args: [],
+      expected: {
+        npm: /^npm (i|install)$/,
+        pnpm: /^pnpm (i|install)$/,
+      },
+    },
+    {
+      name: 'nr',
+      runner: parseNr,
+      args: ['test'],
+      expected: {
+        npm: /^npm run test$/,
+        pnpm: /^pnpm run test$/,
+      },
+    },
+    {
+      name: 'nup',
+      runner: parseNup,
+      args: [],
+      expected: {
+        npm: /^npm update$/,
+        pnpm: /^pnpm update$/,
+      },
+    },
+    {
+      name: 'nlx',
+      runner: parseNlx,
+      args: ['some-pkg'],
+      expected: {
+        npm: /^npx some-pkg$/,
+        pnpm: /^pnpm dlx some-pkg$/,
+      },
+    },
+    {
+      name: 'nun',
+      runner: parseNun,
+      args: ['lodash'],
+      expected: {
+        npm: /^npm (uninstall|remove) lodash$/,
+        pnpm: /^pnpm (remove|uninstall) lodash$/,
+      },
+    },
+    {
+      name: 'na',
+      runner: parseNa,
+      args: [],
+      expected: {
+        npm: /^npm$/,
+        pnpm: /^pnpm$/,
+      },
+    },
+    {
+      name: 'nd',
+      runner: parseNd,
+      args: [],
+      expected: {
+        npm: /^npm dedupe$/,
+        pnpm: /^pnpm dedupe$/,
+      },
+    },
+  ]
+
+  for (const agent of ['npm', 'pnpm'] as const) {
+    for (const commandCase of commandCases) {
+      it(`${commandCase.name} ${agent} --dry-run matches ? output`, async () => {
+        //harness:criterion=c-dry-run-output-matches-question-mark-output,c-dry-run-no-execution-side-effects,c-dry-run-not-forwarded-to-pm,c-dry-run-console-log-spy
+        //harness:criterion=c-ni-dry-run-prints-command,c-ni-question-mark-prints-command,c-nr-dry-run-prints-command,c-nr-question-mark-prints-command,c-pnpm-install-dry-run-prints-command,c-pnpm-run-dry-run-prints-command,c-nup-dry-run-prints-command,c-nlx-dry-run-prints-command,c-nun-dry-run-prints-command,c-na-dry-run-prints-command,c-nd-dry-run-prints-command
+        const dryRunOutput = await runPreview('lockfile', agent, commandCase.runner, ['--dry-run', ...commandCase.args])
+        const questionMarkOutput = await runPreview('lockfile', agent, commandCase.runner, ['?', ...commandCase.args])
+
+        expect(dryRunOutput).toBe(questionMarkOutput)
+        expect(dryRunOutput).toMatch(commandCase.expected[agent])
+        expect(dryRunOutput).not.toContain('--dry-run')
+      })
+    }
+  }
+
+  for (const agent of ['npm', 'pnpm'] as const) {
+    for (const commandCase of commandCases.slice(0, 2)) {
+      it(`${commandCase.name} ${agent} --dry-run snapshots match ? snapshots`, async () => {
+        //harness:criterion=c-dry-run-snapshot-matches
+        const dryRunOutput = await runPreview('lockfile', agent, commandCase.runner, ['--dry-run', ...commandCase.args])
+        const questionMarkOutput = await runPreview('lockfile', agent, commandCase.runner, ['?', ...commandCase.args])
+
+        expect(dryRunOutput).toBe(questionMarkOutput)
+        expect(dryRunOutput).toMatchSnapshot()
+        expect(questionMarkOutput).toMatchSnapshot()
+      })
+    }
+  }
 })

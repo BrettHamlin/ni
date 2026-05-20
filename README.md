@@ -315,8 +315,9 @@ na run foo
 ### Global Flags
 
 ```bash
-# ?               | Print the command execution depends on the agent
+# ?, --dry-run   | Print the command execution depends on the agent
 ni vite ?
+ni --dry-run vite
 
 # -C              | Change directory before running the command
 ni -C packages/foo vite
