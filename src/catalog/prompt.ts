@@ -1,3 +1,4 @@
+import type { RunnerContext } from '../runner'
 import type { CatalogConfig } from './types'
 import { styleText } from 'node:util'
 import prompts from '@posva/prompts'
@@ -12,14 +13,18 @@ export interface CatalogSelection {
 export async function promptSelectCatalog(
   config: CatalogConfig,
   pkgName: string,
-  programmatic?: boolean,
+  ctxOrProgrammatic?: Pick<RunnerContext, 'debug' | 'programmatic'> | boolean,
 ): Promise<CatalogSelection> {
+  const ctx = typeof ctxOrProgrammatic === 'boolean'
+    ? { programmatic: ctxOrProgrammatic }
+    : ctxOrProgrammatic
+
   // Only default catalog: no prompt needed
   if (config.hasDefaultCatalog && !config.hasNamedCatalogs) {
     return { catalogName: 'default' }
   }
 
-  if (programmatic) {
+  if (ctx?.debug || ctx?.programmatic) {
     return { catalogName: undefined }
   }
 

@@ -22,6 +22,7 @@ export interface RunnerContext {
   programmatic?: boolean
   hasLock?: boolean
   cwd?: string
+  debug?: boolean
 }
 
 export interface ExtendedResolvedCommand extends ResolvedCommand {
@@ -71,12 +72,16 @@ export async function runCli(fn: Runner, options: DetectOptions & RunOptions & {
 export async function getCliCommand(
   fn: Runner,
   args: string[],
-  options: DetectOptions = {},
+  options: DetectOptions & Pick<RunnerContext, 'debug'> = {},
   cwd: string = options.cwd ?? process.cwd(),
 ) {
   const isGlobal = args.includes('-g')
   if (isGlobal)
-    return await fn(await getGlobalAgent(), args)
+    return await fn(await getGlobalAgent(), args, {
+      programmatic: options.programmatic,
+      cwd,
+      debug: options.debug,
+    })
 
   let agent = (await detect({ ...options, cwd })) || (await getDefaultAgent(options.programmatic))
   if (agent === 'prompt') {
@@ -96,6 +101,7 @@ export async function getCliCommand(
     programmatic: options.programmatic,
     hasLock: Boolean(agent),
     cwd,
+    debug: options.debug,
   })
 }
 
@@ -194,7 +200,7 @@ export async function run(fn: Runner, args: string[], options: DetectOptions & R
       return
   }
 
-  const command = await getCliCommand(fn, args, { ...options, programmatic }, cwd)
+  const command = await getCliCommand(fn, args, { ...options, programmatic, debug }, cwd)
 
   if (!command)
     return

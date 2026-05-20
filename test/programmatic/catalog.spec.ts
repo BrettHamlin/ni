@@ -1,14 +1,44 @@
+import type { Agent } from 'package-manager-detector'
+import type { Runner } from '../../src/runner'
+import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import prompts from '@posva/prompts'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
+vi.mock('tinyexec', () => ({
+  x: vi.fn(async () => ({
+    exitCode: 0,
+    stdout: '',
+  })),
+}))
+
 vi.mock('../../src/detect', () => ({
   detect: vi.fn(() => 'pnpm'),
 }))
+
+vi.mock('../../src/catalog/package-json', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../../src/catalog/package-json')>()
+  return {
+    ...original,
+    updatePackageJsonCatalogRefs: vi.fn(original.updatePackageJsonCatalogRefs),
+  }
+})
+
+vi.mock('../../src/catalog/pnpm', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../../src/catalog/pnpm')>()
+  return {
+    ...original,
+    pnpmCatalogProvider: {
+      ...original.pnpmCatalogProvider,
+      addPackage: vi.fn(original.pnpmCatalogProvider.addPackage),
+    },
+  }
+})
 
 vi.mock('../../src/config', async (importOriginal) => {
   const original = await importOriginal<typeof import('../../src/config')>()
@@ -47,12 +77,225 @@ async function createTempDir(fixture: string): Promise<string> {
   return tmp
 }
 
+async function createNpmTempDir(): Promise<string> {
+  const tmp = await fs.promises.mkdtemp(path.join(tmpdir(), 'ni-npm-preview-'))
+  await fs.promises.writeFile(
+    path.join(tmp, 'package.json'),
+    `${JSON.stringify({ name: 'npm-preview', private: true, dependencies: {} }, null, 2)}\n`,
+  )
+  return tmp
+}
+
 function readJson(filePath: string) {
   return JSON.parse(fs.readFileSync(filePath, 'utf-8'))
 }
 
+function hashFile(filePath: string) {
+  return createHash('sha256').update(fs.readFileSync(filePath)).digest('hex')
+}
+
+function getFileState(filePath: string) {
+  if (!fs.existsSync(filePath))
+    return { exists: false }
+
+  const stat = fs.statSync(filePath)
+  return {
+    exists: true,
+    hash: hashFile(filePath),
+    mtimeMs: stat.mtimeMs,
+  }
+}
+
+const niRunner: Runner = async (agent: Agent, args, ctx) => {
+  const { handleCatalogInstall } = await import('../../src/catalog/handler')
+  if (!args.includes('-g')) {
+    const catalogCmd = await handleCatalogInstall(agent, args, ctx)
+    if (catalogCmd !== undefined)
+      return catalogCmd
+  }
+
+  const { parseNi } = await import('../../src/parse')
+  return parseNi(agent, args, ctx)
+}
+
+async function runNi(args: string[], cwd: string) {
+  const { run } = await import('../../src/runner')
+  await run(niRunner, [...args], {
+    cwd,
+    detectVolta: false,
+    programmatic: true,
+  })
+}
+
 beforeEach(() => {
-  vi.restoreAllMocks()
+  vi.clearAllMocks()
+})
+
+describe('ni preview mode contract', () => {
+  it('threads the debug flag through run and strips ? before the runner', async () => {
+    // harness:criterion=c-runner-context-debug-field,c-run-strips-question-sets-debug,c-no-debug-flag-without-question-mark
+    const { run } = await import('../../src/runner')
+    const captured: Array<{ args: string[], debug: boolean | undefined }> = []
+    const runner: Runner = (agent, args, ctx) => {
+      captured.push({ args: [...args], debug: ctx?.debug })
+      return undefined
+    }
+
+    await run(runner, ['?', 'react'], { cwd: await createTempDir('pnpm'), programmatic: true })
+    await run(runner, ['react'], { cwd: await createTempDir('pnpm'), programmatic: true })
+
+    expect(captured[0].debug).toBe(true)
+    expect(captured[0].args).toEqual(['react'])
+    expect(captured[0].args).not.toContain('?')
+    expect(captured[1].debug).toBeFalsy()
+  })
+
+  it('previews a named-catalog pnpm install without mutating files or spawning pnpm', async () => {
+    // harness:criterion=c-catalog-preview-no-add-package,c-catalog-preview-no-update-package-json-refs,c-catalog-preview-no-workspace-yaml-mutation,c-catalog-preview-no-lockfile-mutation,c-catalog-preview-returns-command,c-catalog-preview-no-install-executed,c-handle-catalog-install-debug-flag-visible,c-preview-stdout-command-byte-preservation
+    const cwd = await createTempDir('pnpm')
+    const packageJsonPath = path.join(cwd, 'package.json')
+    const workspacePath = path.join(cwd, 'pnpm-workspace.yaml')
+    const lockfilePath = path.join(cwd, 'pnpm-lock.yaml')
+    const beforePackageJson = hashFile(packageJsonPath)
+    const beforeWorkspace = hashFile(workspacePath)
+    const beforeLockfile = getFileState(lockfilePath)
+
+    const { pnpmCatalogProvider } = await import('../../src/catalog/pnpm')
+    const packageJsonModule = await import('../../src/catalog/package-json')
+    const handlerModule = await import('../../src/catalog/handler')
+    const { x } = await import('tinyexec')
+    const handleSpy = vi.spyOn(handlerModule, 'handleCatalogInstall')
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    let logCalls: unknown[][] = []
+
+    try {
+      await runNi(['?', 'react'], cwd)
+      logCalls = [...logSpy.mock.calls]
+    }
+    finally {
+      logSpy.mockRestore()
+    }
+
+    expect(vi.mocked(pnpmCatalogProvider.addPackage)).toHaveBeenCalledTimes(0)
+    expect(vi.mocked(packageJsonModule.updatePackageJsonCatalogRefs)).toHaveBeenCalledTimes(0)
+    expect(hashFile(packageJsonPath)).toBe(beforePackageJson)
+    expect(hashFile(workspacePath)).toBe(beforeWorkspace)
+    expect(getFileState(lockfilePath)).toEqual(beforeLockfile)
+    expect(logCalls).toHaveLength(1)
+    expect(logCalls[0][0]).toBe('pnpm add react')
+    expect(vi.mocked(x)).not.toHaveBeenCalled()
+    expect(handleSpy).toHaveBeenCalled()
+    expect(handleSpy.mock.calls[0][2]?.debug).toBe(true)
+  })
+
+  it('previews a default-only pnpm catalog install without writing catalog or package refs', async () => {
+    // harness:criterion=c-catalog-preview-default-only-no-add-package,c-catalog-preview-default-only-no-workspace-yaml-mutation,c-catalog-preview-default-only-no-package-json-mutation,c-catalog-preview-default-only-returns-command
+    const cwd = await createTempDir('pnpm-default-only')
+    const packageJsonPath = path.join(cwd, 'package.json')
+    const workspacePath = path.join(cwd, 'pnpm-workspace.yaml')
+    const beforePackageJson = hashFile(packageJsonPath)
+    const beforeWorkspace = hashFile(workspacePath)
+
+    const { pnpmCatalogProvider } = await import('../../src/catalog/pnpm')
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    let logCalls: unknown[][] = []
+
+    try {
+      await runNi(['?', 'lodash'], cwd)
+      logCalls = [...logSpy.mock.calls]
+    }
+    finally {
+      logSpy.mockRestore()
+    }
+
+    expect(vi.mocked(pnpmCatalogProvider.addPackage)).toHaveBeenCalledTimes(0)
+    expect(hashFile(packageJsonPath)).toBe(beforePackageJson)
+    expect(hashFile(workspacePath)).toBe(beforeWorkspace)
+    expect(logCalls).toHaveLength(1)
+    expect(logCalls[0][0]).toBe('pnpm add lodash')
+  })
+
+  it('does not open an interactive catalog prompt while debugging', async () => {
+    // harness:criterion=c-catalog-preview-no-interactive-prompt
+    const cwd = await createTempDir('pnpm')
+    const { pnpmCatalogProvider } = await import('../../src/catalog/pnpm')
+    const { promptSelectCatalog } = await import('../../src/catalog/prompt')
+    const config = await pnpmCatalogProvider.detect(cwd)
+    const stdinReadSpy = vi.spyOn(process.stdin, 'read').mockImplementation(() => {
+      throw new Error('stdin was read')
+    })
+
+    try {
+      const started = Date.now()
+      const result = await Promise.race([
+        promptSelectCatalog(config!, 'lodash', { debug: true }),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('prompt timed out')), 100)),
+      ])
+
+      expect(Date.now() - started).toBeLessThan(100)
+      expect(result.catalogName).toBeUndefined()
+      expect(stdinReadSpy).not.toHaveBeenCalled()
+      expect(vi.mocked(prompts)).not.toHaveBeenCalled()
+    }
+    finally {
+      stdinReadSpy.mockRestore()
+    }
+  })
+
+  it('previews an npm non-catalog install without file writes or child process execution', async () => {
+    // harness:criterion=c-npm-non-catalog-preview-no-package-json-mutation,c-npm-non-catalog-preview-no-lockfile-mutation,c-npm-non-catalog-preview-no-install-executed,c-npm-non-catalog-preview-returns-command
+    const cwd = await createNpmTempDir()
+    const packageJsonPath = path.join(cwd, 'package.json')
+    const lockfilePath = path.join(cwd, 'package-lock.json')
+    const beforePackageJson = hashFile(packageJsonPath)
+    const beforeLockfile = getFileState(lockfilePath)
+    const { detect } = await import('../../src/detect')
+    const { x } = await import('tinyexec')
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    let logCalls: unknown[][] = []
+    vi.mocked(detect).mockResolvedValueOnce('npm')
+
+    try {
+      await runNi(['?', 'react'], cwd)
+      logCalls = [...logSpy.mock.calls]
+    }
+    finally {
+      logSpy.mockRestore()
+    }
+
+    expect(hashFile(packageJsonPath)).toBe(beforePackageJson)
+    expect(getFileState(lockfilePath)).toEqual(beforeLockfile)
+    expect(logCalls).toHaveLength(1)
+    expect(logCalls[0][0]).toBe('npm i react')
+    expect(vi.mocked(x)).not.toHaveBeenCalled()
+  })
+
+  it('keeps normal pnpm catalog installs mutating package refs and catalog files', async () => {
+    // harness:criterion=c-catalog-normal-install-mutates-workspace-yaml,c-catalog-normal-install-mutates-package-json,c-catalog-normal-install-calls-add-package
+    const namedCwd = await createTempDir('pnpm')
+    const namedPackageJsonPath = path.join(namedCwd, 'package.json')
+    const beforeNamedPackageJson = hashFile(namedPackageJsonPath)
+    const packageJsonModule = await import('../../src/catalog/package-json')
+
+    await runNi(['react'], namedCwd)
+
+    const namedPkg = readJson(namedPackageJsonPath)
+    expect(vi.mocked(packageJsonModule.updatePackageJsonCatalogRefs)).toHaveBeenCalled()
+    expect(hashFile(namedPackageJsonPath)).not.toBe(beforeNamedPackageJson)
+    expect(namedPkg.dependencies.react).toBe('catalog:prod')
+
+    const defaultOnlyCwd = await createTempDir('pnpm-default-only')
+    const workspacePath = path.join(defaultOnlyCwd, 'pnpm-workspace.yaml')
+    const beforeWorkspace = hashFile(workspacePath)
+    const { pnpmCatalogProvider } = await import('../../src/catalog/pnpm')
+
+    await runNi(['lodash'], defaultOnlyCwd)
+
+    const workspaceContent = fs.readFileSync(workspacePath, 'utf-8')
+    expect(vi.mocked(pnpmCatalogProvider.addPackage)).toHaveBeenCalled()
+    expect(hashFile(workspacePath)).not.toBe(beforeWorkspace)
+    expect(workspaceContent).toContain('lodash')
+  })
 })
 
 describe('catalog handler - named catalogs', () => {

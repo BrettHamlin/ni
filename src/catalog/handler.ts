@@ -42,7 +42,7 @@ async function resolveCatalogForPackage(
   provider: CatalogProvider,
   config: CatalogConfig,
   pkgName: string,
-  programmatic?: boolean,
+  ctx?: Pick<RunnerContext, 'debug' | 'programmatic'>,
 ): Promise<{ catalogName: string | undefined, version?: string }> {
   // Check if already in a catalog
   const existing = provider.findPackage(config, pkgName)
@@ -51,9 +51,12 @@ async function resolveCatalogForPackage(
   }
 
   // Prompt user to select catalog
-  const { catalogName } = await promptSelectCatalog(config, pkgName, programmatic)
+  const { catalogName } = await promptSelectCatalog(config, pkgName, ctx)
   if (!catalogName)
     return { catalogName: undefined }
+
+  if (ctx?.debug)
+    return { catalogName }
 
   // Fetch latest version for new catalog entry
   const version = await resolveVersion(pkgName)
@@ -93,9 +96,14 @@ export async function handleCatalogInstall(
   const skippedPackages: string[] = []
 
   for (const pkg of packages) {
-    const result = await resolveCatalogForPackage(provider, config, pkg, ctx?.programmatic)
+    const result = await resolveCatalogForPackage(provider, config, pkg, ctx)
 
     if (result.catalogName) {
+      catalogEntries.push({ name: pkg, catalogRef: getCatalogRef(result.catalogName) })
+
+      if (ctx?.debug)
+        continue
+
       // Add to catalog file if it's a new entry
       if (result.version) {
         await provider.addPackage(config, result.catalogName, pkg, result.version)
@@ -109,7 +117,6 @@ export async function handleCatalogInstall(
         // eslint-disable-next-line no-console
         console.log(`${styleText('green', '✓')} ${styleText('cyan', pkg)} ${styleText('dim', `→ found in ${existingCatalog!.name} catalog`)}`)
       }
-      catalogEntries.push({ name: pkg, catalogRef: getCatalogRef(result.catalogName) })
     }
     else {
       skippedPackages.push(pkg)
@@ -134,6 +141,10 @@ export async function handleCatalogInstall(
       process.exit(1)
     }
     throw new Error('No package.json found')
+  }
+
+  if (ctx?.debug) {
+    return getCommand(agent, 'add', args)
   }
 
   // Update package.json with catalog refs
